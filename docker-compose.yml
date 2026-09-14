@@ -1,0 +1,90 @@
+# 岗位实训系统 · Docker Compose 部署编排
+#
+# 一键拉起「PostgreSQL + training-system 后端」两件套。
+#
+# 快速开始：
+#   cp .env.example .env      # 按需修改，务必替换 SESSION_KEY / POSTGRES_PASSWORD
+#   docker compose up -d      # 首次启动会自动建表 + 灌入演示数据（DB_INIT=true）
+#   curl http://localhost:8080/health/live
+#
+# 说明：
+#   - 后端镜像默认有两个来源（见 .env.example 的 IMAGE 变量）：
+#       1) ghcr.io/ziruibai/training-system:latest （CI 已构建推送，默认）
+#       2) 本地构建：backend/Dockerfile
+#     如需本地构建，执行：docker compose build && docker compose up -d
+#   - DB_INIT=true 是项目内置的生产环境一次性初始化开关（见 backend/cmd/server/main.go），
+#     它会用 GORM 建表并调用 database.Seed() 写入演示数据。Seed 自身幂等（users 表非空即跳过），
+#     首次部署成功后建议改为 false，避免每次启动都走初始化分支。
+#   - backend/migrations/postgres/001_init.sql 是等价的、可人工审阅的建表 SQL，
+#     供 DBA / 托管数据库场景手动执行；Docker Compose 路径无需它介入。
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: training-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-training}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+      POSTGRES_DB: ${POSTGRES_DB:-training}
+      # 演示/测试环境可保持默认；如需中文排序可按需调整
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8"
+    ports:
+      # 仅暴露到本机，避免数据库直接暴露在公网；后端通过内部网络访问。
+      # 若确实需要外部连接，改为 "${POSTGRES_PORT:-5432}:5432" 并自行加固。
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-training} -d ${POSTGRES_DB:-training}"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    networks:
+      - training-net
+
+  backend:
+    # IMAGE 默认指向 CI 已推送的镜像；也可改为本地标签后用 build 段构建。
+    image: ${IMAGE:-ghcr.io/ziruibai/training-system:latest}
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: training-backend
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      # —— 运行模式：production 强制要求 DB_DRIVER=postgres（见 internal/config/config.go）
+      APP_ENV: ${APP_ENV:-production}
+      PORT: "8080"
+      DB_DRIVER: ${DB_DRIVER:-postgres}
+      # 服务在容器内通过 compose 服务名 postgres 访问数据库，因此主机名为 postgres
+      DB_DSN: ${DB_DSN:-postgres://${POSTGRES_USER:-training}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-training}?sslmode=disable}
+      # 必须 >= 16 字符，生产环境请务必替换为随机值
+      SESSION_KEY: ${SESSION_KEY:?SESSION_KEY is required (>=16 chars)}
+      SESSION_DAYS: ${SESSION_DAYS:-7}
+      # 一次性初始化开关：首次部署为 true，建表 + 写入演示数据
+      DB_INIT: ${DB_INIT:-true}
+      # 可选：启用 G.AIOS 智能体联动（AI Assistant 聊天）。留空则该功能返回 503，其余功能不受影响。
+      GAIOS_AGENT_API_KEY: ${GAIOS_AGENT_API_KEY:-}
+    ports:
+      - "${BACKEND_PORT:-8080}:8080"
+    healthcheck:
+      # 运行层镜像基于 alpine，Dockerfile 中已安装 wget，可直接用于健康检查
+      test: ["CMD-SHELL", "wget -q -O- http://127.0.0.1:8080/health/live || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 20s
+    networks:
+      - training-net
+
+volumes:
+  pgdata:
+    driver: local
+
+networks:
+  training-net:
+    driver: bridge

@@ -1,0 +1,11 @@
+# Build artifacts
+/server
+*.exe
+# Local databases
+*.db
+*.sqlite
+# Local env with secrets
+.env
+# Uploaded runtime files
+uploads/*
+!uploads/.gitkeep
